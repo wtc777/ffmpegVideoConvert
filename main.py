@@ -214,7 +214,7 @@ class ReorderDialog(tk.Toplevel):
         self.result: Optional[List[Path]] = None
         self.file_paths = list(files)
 
-        self.transient(master)
+        # self.transient(master)
 
         self.protocol("WM_DELETE_WINDOW", self.on_cancel)
 
@@ -239,8 +239,35 @@ class ReorderDialog(tk.Toplevel):
         self.bind("<Return>", lambda _: self.on_ok())
 
         self.refresh_list(0)
+        self.update_idletasks()
+
+        # 1) 短暂置顶，确保从文件选择器切回就能看到
+        try:
+            self.attributes("-topmost", True)
+            self.after(300, lambda: self.attributes("-topmost", False))
+        except Exception:
+            pass
+
+        # 2) 居中并做边界纠偏（防止在多屏环境下跑屏外）
+        try:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 3)
+            self.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        # 3) 抢焦点 + 模态抓取（grab_set 放最后）
+        try:
+            self.lift()
+            self.focus_force()
+            self.grab_set()
+        except Exception:
+            pass
 
         self.after(10, self._make_modal)
+
 
     def _make_modal(self):
         """确保窗口可见后再获取焦点和输入捕获，避免部分平台上抓取失败"""
@@ -296,15 +323,31 @@ class ReorderDialog(tk.Toplevel):
 
 
 def reorder_files(files: List[Path]) -> Optional[List[Path]]:
-    if len(files) <= 1:
-        return files
-    root = tk.Tk()
-    root.withdraw()
-    dlg = ReorderDialog(root, files)
-    root.wait_window(dlg)
-    result = getattr(dlg, "result", None)
-    root.destroy()
-    return result
+	if len(files) <= 1:
+		return files
+	root = tk.Tk()
+	root.withdraw()
+
+	dlg = ReorderDialog(root, files)
+
+	# ——兜底：3 秒后仍未关闭排序窗，就按原顺序继续——
+	decided = {"done": False, "result": None}
+	def _timeout():
+		if dlg.winfo_exists():
+			try:
+				decided["done"] = True
+				decided["result"] = files
+				dlg.destroy()
+			except Exception:
+				pass
+	# root.after(3000, _timeout)
+
+	root.wait_window(dlg)
+	result = decided["result"] if decided["done"] else getattr(dlg, "result", None)
+	root.destroy()
+	return result
+
+
 
 
 def ask_split_points(duration: Optional[float]) -> Optional[List[float]]:
