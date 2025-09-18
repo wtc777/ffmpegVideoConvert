@@ -109,67 +109,69 @@ class SplitProfileSelector(tk.Toplevel):
 		self.resizable(False, False)
 		self.result = None
 
-		# self.transient(master)
+		# 允许无主也能显示在前台
 		self.grab_set()
 		self.protocol("WM_DELETE_WINDOW", self.on_cancel)
 
 		pad = 14
 		ttk.Label(self, text="请选择拆分后的编码策略：", font=("Microsoft YaHei", 11)).pack(padx=pad, pady=(pad, 6))
 
-		self.mode = tk.StringVar(value="vis")  # 默认视觉无损
-		self.hw = tk.StringVar(value="nvenc")  # 默认 NVIDIA
+		self.mode = tk.StringVar(value="vis")   # 默认视觉无损（x264）
+		self.hw264 = tk.StringVar(value="nvenc")
+		self.hw265 = tk.StringVar(value="nvenc")
 
-		box = ttk.Frame(self);
-		box.pack(padx=pad, pady=6, fill="x")
+		# 编码族选择
+		box = ttk.Frame(self); box.pack(padx=pad, pady=6, fill="x")
+		ttk.Radiobutton(box, text="① 无损（H.264 x264 CRF 0）", variable=self.mode, value="loss").pack(anchor="w", pady=2)
+		ttk.Radiobutton(box, text="② 视觉无损（H.264 x264 CRF 18）", variable=self.mode, value="vis").pack(anchor="w", pady=2)
+		ttk.Radiobutton(box, text="③ H.265 压缩（libx265 CRF 23）", variable=self.mode, value="hevc").pack(anchor="w", pady=2)
 
-		ttk.Radiobutton(box, text="① 无损（x264 CRF 0，慢、体积大，质量=原片）", variable=self.mode, value="loss").pack(
-			anchor="w", pady=2)
-		ttk.Radiobutton(box, text="② 视觉无损（x264 CRF 18，快、体积友好，质量≈原片）", variable=self.mode,
-						value="vis").pack(anchor="w", pady=2)
-		ttk.Radiobutton(box, text="③ H.265 压缩（libx265，体积更小，画质≈原片）",
-						variable=self.mode, value="hevc").pack(anchor="w", pady=2)
+		ttk.Radiobutton(box, text="④ H.264 硬件加速", variable=self.mode, value="hw264").pack(anchor="w", pady=(8,2))
+		h264row = ttk.Frame(box); h264row.pack(padx=18, pady=(0,6), fill="x")
+		ttk.Radiobutton(h264row, text="NVIDIA (h264_nvenc)", variable=self.hw264, value="nvenc").pack(side="left", padx=(0,10))
+		ttk.Radiobutton(h264row, text="Intel (h264_qsv)",   variable=self.hw264, value="qsv").pack(side="left", padx=(0,10))
+		ttk.Radiobutton(h264row, text="AMD (h264_amf)",     variable=self.hw264, value="amf").pack(side="left")
 
-		# 注意：原来的硬件加速选项顺序要往下排（④）
+		ttk.Radiobutton(box, text="⑤ H.265 硬件加速", variable=self.mode, value="hw265").pack(anchor="w", pady=(8,2))
+		h265row = ttk.Frame(box); h265row.pack(padx=18, pady=(0,6), fill="x")
+		ttk.Radiobutton(h265row, text="NVIDIA (hevc_nvenc)", variable=self.hw265, value="nvenc").pack(side="left", padx=(0,10))
+		ttk.Radiobutton(h265row, text="Intel (hevc_qsv)",    variable=self.hw265, value="qsv").pack(side="left", padx=(0,10))
+		ttk.Radiobutton(h265row, text="AMD (hevc_amf)",      variable=self.hw265, value="amf").pack(side="left")
 
-		hwfrm = ttk.Frame(self);
-		hwfrm.pack(padx=pad, pady=(8, 6), fill="x")
-		ttk.Radiobutton(hwfrm, text="③ 硬件加速", variable=self.mode, value="hw").grid(row=0, column=0, sticky="w")
-
-		hwopts = ttk.Frame(hwfrm);
-		hwopts.grid(row=1, column=0, sticky="w", pady=(4, 0))
-		ttk.Radiobutton(hwopts, text="NVIDIA (h264_nvenc)", variable=self.hw, value="nvenc").pack(side="left",
-																								  padx=(0, 8))
-		ttk.Radiobutton(hwopts, text="Intel (h264_qsv)", variable=self.hw, value="qsv").pack(side="left", padx=(0, 8))
-		ttk.Radiobutton(hwopts, text="AMD (h264_amf)", variable=self.hw, value="amf").pack(side="left", padx=(0, 8))
-
-		btns = ttk.Frame(self);
-		btns.pack(padx=pad, pady=(8, pad), fill="x")
+		btns = ttk.Frame(self); btns.pack(padx=pad, pady=(8, pad), fill="x")
 		ttk.Button(btns, text="取消", width=10, command=self.on_cancel).pack(side="right", padx=4)
 		ttk.Button(btns, text="确定", width=10, command=self.on_ok).pack(side="right")
 
+		# 置顶 + 居中
 		self.update_idletasks()
 		try:
 			self.attributes("-topmost", True)
 			self.after(300, lambda: self.attributes("-topmost", False))
 		except Exception:
 			pass
-		# 居中
 		try:
 			sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
 			w, h = self.winfo_reqwidth(), self.winfo_reqheight()
-			x = max(0, (sw - w) // 2);
-			y = max(0, (sh - h) // 3)
+			x = max(0, (sw - w)//2); y = max(0, (sh - h)//3)
 			self.geometry(f"+{x}+{y}")
 		except Exception:
 			pass
 
 	def on_ok(self):
-		self.result = {"mode": self.mode.get(), "hw": self.hw.get()}
+		# 返回编码族 + 具体硬件类型
+		m = self.mode.get()
+		hw = None
+		if m == "hw264":
+			hw = self.hw264.get()
+		elif m == "hw265":
+			hw = self.hw265.get()
+		self.result = {"mode": m, "hw": hw}
 		self.destroy()
 
 	def on_cancel(self):
 		self.result = None
 		self.destroy()
+
 
 
 def choose_split_profile() -> Optional[dict]:
@@ -180,6 +182,8 @@ def choose_split_profile() -> Optional[dict]:
 	res = getattr(dlg, "result", None)
 	root.destroy()
 	return res
+
+
 
 
 class ModeSelector(tk.Tk):
@@ -973,72 +977,104 @@ def split_worker(in_path: Path, split_points: List[float], out_dir: Path, enc_pr
 
 		# ——编码策略——
 		if mode == "loss":
-			# 完全无损（体积大、较慢）
+			# H.264 x264 无损
 			cmd += [
 				"-c:v", "libx264", "-crf", "0", "-preset", "slow",
 				"-pix_fmt", src_pix,
-				"-c:a", "copy",  # 如遇边界咔哒：改 aac 192k
+				"-c:a", "copy",
 				str(out_path)
 			]
-
-		elif mode == "hw":
-			# 硬件加速（视觉无损取向）：≈CRF 18 的主观质量
-			if hw == "nvenc":
-				# NVIDIA：质量优先的 NVENC 参数
-				cmd += [
-					"-c:v", "h264_nvenc",
-					"-preset", "p5",  # p4/p5(质量更好)/p6/p7(更慢更好)
-					"-tune", "hq",  # 高质量
-					"-rc", "vbr",  # 质量为主的可变码率
-					"-cq", "18",  # 类似 CRF 18 的主观强度
-					"-b:v", "0", "-maxrate", "0",  # 让 CQ 主导
-					"-bf", "3", "-g", "240",  # 合理 B 帧和 GOP
-					"-pix_fmt", "yuv420p",
-					"-c:a", "aac", "-b:a", "192k",
-					str(out_path)
-				]
-
-			elif hw == "qsv":
-				# Intel QSV：global_quality≈18 + 预判
-				cmd += [
-					"-c:v", "h264_qsv",
-					"-global_quality", "18",  # 质量目标
-					"-look_ahead", "1",  # 码率前瞻，改善质量
-					"-g", "240", "-bf", "3",
-					"-pix_fmt", "nv12",  # QSV 常用色度
-					"-c:a", "aac", "-b:a", "192k",
-					str(out_path)
-				]
-			else:  # "amf"
-				# AMD AMF：质量模式 + 近似 QP18
-				cmd += [
-					"-c:v", "h264_amf",
-					"-quality", "quality",
-					"-rc", "vbr",
-					# AMF 的等效“视觉无损”做法：给出较低 QP
-					"-qp_i", "18", "-qp_p", "18", "-qp_b", "20",
-					"-g", "240", "-bf", "3",
-					"-pix_fmt", "yuv420p",
-					"-c:a", "aac", "-b:a", "192k",
-					str(out_path)
-				]
-		elif mode == "hevc":
-			# H.265 压缩：体积更小，画质≈原片
-			cmd += [
-				"-c:v", "libx265", "-crf", "23", "-preset", "medium",
-				"-pix_fmt", "yuv420p",
-				"-c:a", "aac", "-b:a", "128k",
-				str(out_path)
-			]
-
-		else:
-			# 视觉无损（推荐默认）：画质≈原片，体积友好、速度快
+		elif mode == "vis":
+			# H.264 x264 视觉无损
 			cmd += [
 				"-c:v", "libx264", "-crf", "18", "-preset", "fast",
 				"-pix_fmt", src_pix,
 				"-c:a", "aac", "-b:a", "192k",
 				str(out_path)
 			]
+		elif mode == "hevc":
+			# H.265 CPU（libx265）
+			cmd += [
+				"-c:v", "libx265", "-crf", "23", "-preset", "medium",
+				"-pix_fmt", "yuv420p",
+				"-c:a", "aac", "-b:a", "128k",
+				str(out_path)
+			]
+		elif mode == "hw264":
+			# H.264 硬件加速：NVENC/QSV/AMF
+			hw = (enc_profile or {}).get("hw", "nvenc")
+			if hw == "nvenc":
+				cmd += [
+					"-c:v", "h264_nvenc",
+					"-preset", "p5", "-tune", "hq",
+					"-rc", "vbr", "-cq", "18",
+					"-b:v", "0", "-maxrate", "0",
+					"-bf", "3", "-g", "240",
+					"-pix_fmt", "yuv420p",
+					"-c:a", "aac", "-b:a", "192k",
+					str(out_path)
+				]
+			elif hw == "qsv":
+				cmd += [
+					"-c:v", "h264_qsv",
+					"-global_quality", "18", "-look_ahead", "1",
+					"-g", "240", "-bf", "3",
+					"-pix_fmt", "nv12",
+					"-c:a", "aac", "-b:a", "192k",
+					str(out_path)
+				]
+			else:  # amf
+				cmd += [
+					"-c:v", "h264_amf",
+					"-quality", "quality", "-rc", "vbr",
+					"-qp_i", "18", "-qp_p", "18", "-qp_b", "20",
+					"-g", "240", "-bf", "3",
+					"-pix_fmt", "yuv420p",
+					"-c:a", "aac", "-b:a", "192k",
+					str(out_path)
+				]
+		elif mode == "hw265":
+			# H.265 硬件加速：NVENC/QSV/AMF（HEVC）
+			hw = (enc_profile or {}).get("hw", "nvenc")
+			if hw == "nvenc":
+				cmd += [
+					"-c:v", "hevc_nvenc",
+					"-preset", "p5", "-tune", "hq",
+					"-rc", "vbr", "-cq", "23",
+					"-b:v", "0", "-maxrate", "0",
+					"-bf", "3", "-g", "240",
+					"-pix_fmt", "yuv420p",
+					"-c:a", "aac", "-b:a", "128k",
+					str(out_path)
+				]
+			elif hw == "qsv":
+				cmd += [
+					"-c:v", "hevc_qsv",
+					"-global_quality", "23", "-look_ahead", "1",
+					"-g", "240", "-bf", "3",
+					"-pix_fmt", "p010le",  # hevc_qsv 常见 10-bit；如需 8-bit 可改 nv12
+					"-c:a", "aac", "-b:a", "128k",
+					str(out_path)
+				]
+			else:  # amf
+				cmd += [
+					"-c:v", "hevc_amf",
+					"-quality", "quality", "-rc", "vbr",
+					"-qp_i", "23", "-qp_p", "23", "-qp_b", "25",
+					"-g", "240", "-bf", "3",
+					"-pix_fmt", "yuv420p",
+					"-c:a", "aac", "-b:a", "128k",
+					str(out_path)
+				]
+		else:
+			# 兜底：仍走视觉无损 x264
+			cmd += [
+				"-c:v", "libx264", "-crf", "18", "-preset", "fast",
+				"-pix_fmt", src_pix,
+				"-c:a", "aac", "-b:a", "192k",
+				str(out_path)
+			]
+
 
 		ok, fatal = run_ffmpeg_with_progress(cmd, q, stop_flag, seg_duration)
 		if ok is None:
