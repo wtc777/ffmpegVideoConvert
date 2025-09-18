@@ -13,6 +13,7 @@ import re
 import time
 import threading
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -27,14 +28,14 @@ FFPROBE = "ffprobe"
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".flv", ".wmv", ".m4v", ".ts", ".webm"}
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 # =============== 选择模式 ===============
 class ModeSelector(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("选择处理模式")
-        self.geometry("420x230")
+        self.geometry("450x320")
         self.resizable(False, False)
         self.choice = tk.StringVar(value="quality")
 
@@ -48,6 +49,10 @@ class ModeSelector(tk.Tk):
                         variable=self.choice, value="size").pack(anchor="w", padx=20, pady=4)
         ttk.Radiobutton(frm, text="只提取音频（.m4a，AAC 128k）",
                         variable=self.choice, value="audio").pack(anchor="w", padx=20, pady=4)
+        ttk.Radiobutton(frm, text="视频合并（按自定义顺序拼接多个视频）",
+                        variable=self.choice, value="merge").pack(anchor="w", padx=20, pady=4)
+        ttk.Radiobutton(frm, text="视频拆分（按时间戳将单个视频拆成多段）",
+                        variable=self.choice, value="split").pack(anchor="w", padx=20, pady=4)
 
         ttk.Button(self, text="下一步：选择文件", command=self.destroy).pack(pady=12)
 
@@ -56,15 +61,25 @@ def choose_mode() -> str:
     app.mainloop()
     return app.choice.get()
 
-def choose_files() -> List[Path]:
+def choose_files(multiple: bool = True,
+                 title: str = "选择要处理的视频文件（可多选）") -> List[Path]:
     root = tk.Tk()
     root.withdraw()
-    paths = filedialog.askopenfilenames(
-        title="选择要处理的视频文件（可多选）",
-        filetypes=[("Video files", "*.mp4 *.mov *.mkv *.avi *.flv *.wmv *.m4v *.ts *.webm"),
-                   ("All files", "*.*")]
-    )
+    if multiple:
+        paths = filedialog.askopenfilenames(
+            title=title,
+            filetypes=[("Video files", "*.mp4 *.mov *.mkv *.avi *.flv *.wmv *.m4v *.ts *.webm"),
+                       ("All files", "*.*")]
+        )
+    else:
+        single = filedialog.askopenfilename(
+            title=title,
+            filetypes=[("Video files", "*.mp4 *.mov *.mkv *.avi *.flv *.wmv *.m4v *.ts *.webm"),
+                       ("All files", "*.*")]
+        )
+        paths = (single,) if single else ()
     root.update()
+    root.destroy()
     files = [Path(p) for p in paths if Path(p).suffix.lower() in VIDEO_EXTS]
     return files
 
@@ -138,6 +153,197 @@ def ensure_unique_path(p: Path) -> Path:
         if not cand.exists():
             return cand
         i += 1
+
+
+def parse_timestamp(value: str) -> Optional[float]:
+    """解析字符串时间戳，支持 123 / mm:ss / hh:mm:ss[.ms]"""
+    text = value.strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    try:
+        if len(parts) == 1:
+            sec = float(parts[0])
+            if sec < 0:
+                return None
+            return sec
+        if len(parts) == 2:
+            minutes = int(parts[0])
+            seconds = float(parts[1])
+            if minutes < 0 or seconds < 0 or seconds >= 60:
+                return None
+            return minutes * 60 + seconds
+        if len(parts) == 3:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            seconds = float(parts[2])
+            if hours < 0 or minutes < 0 or minutes >= 60 or seconds < 0 or seconds >= 60:
+                return None
+            return hours * 3600 + minutes * 60 + seconds
+    except ValueError:
+        return None
+    return None
+
+
+def format_timestamp_precise(sec: float) -> str:
+    """格式化浮点秒为 ffmpeg 需要的 hh:mm:ss.xxx"""
+    total = max(0.0, float(sec))
+    hours = int(total // 3600)
+    minutes = int((total % 3600) // 60)
+    seconds = round(total - hours * 3600 - minutes * 60, 3)
+    if seconds >= 60:
+        seconds -= 60
+        minutes += 1
+    if minutes >= 60:
+        minutes -= 60
+        hours += 1
+    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+
+
+def escape_concat_path(path: Path) -> str:
+    text = str(path)
+    text = text.replace("\\", "\\\\")
+    return text.replace("'", "'\\''")
+
+
+class ReorderDialog(tk.Toplevel):
+    def __init__(self, master, files: List[Path]):
+        super().__init__(master)
+        self.title("调整拼接顺序")
+        self.resizable(False, False)
+        self.result: Optional[List[Path]] = None
+        self.file_paths = list(files)
+
+        self.transient(master)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.on_cancel)
+
+        ttk.Label(self, text="选中条目后使用按钮调整拼接顺序。",
+                  font=("Microsoft YaHei", 10)).pack(padx=16, pady=(16, 8))
+
+        self.listbox = tk.Listbox(self, selectmode=tk.SINGLE, width=56,
+                                   height=min(12, max(4, len(files))))
+        self.listbox.pack(padx=16, pady=(0, 8))
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(padx=16, pady=(0, 12))
+        ttk.Button(btn_frame, text="上移", command=self.move_up, width=10).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="下移", command=self.move_down, width=10).pack(side="left", padx=4)
+
+        action_frame = ttk.Frame(self)
+        action_frame.pack(padx=16, pady=(0, 16), fill="x")
+        ttk.Button(action_frame, text="取消", command=self.on_cancel, width=10).pack(side="right", padx=4)
+        ttk.Button(action_frame, text="确定", command=self.on_ok, width=10).pack(side="right", padx=4)
+
+        self.bind("<Escape>", lambda _: self.on_cancel())
+        self.bind("<Return>", lambda _: self.on_ok())
+
+        self.refresh_list(0)
+
+    def refresh_list(self, selection: int):
+        self.listbox.delete(0, tk.END)
+        for idx, path in enumerate(self.file_paths, 1):
+            self.listbox.insert(tk.END, f"{idx}. {path.name}")
+        if self.file_paths and 0 <= selection < len(self.file_paths):
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(selection)
+            self.listbox.activate(selection)
+            self.listbox.see(selection)
+
+    def move_up(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx <= 0:
+            return
+        self.file_paths[idx - 1], self.file_paths[idx] = self.file_paths[idx], self.file_paths[idx - 1]
+        self.refresh_list(idx - 1)
+
+    def move_down(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self.file_paths) - 1:
+            return
+        self.file_paths[idx], self.file_paths[idx + 1] = self.file_paths[idx + 1], self.file_paths[idx]
+        self.refresh_list(idx + 1)
+
+    def on_ok(self):
+        self.result = list(self.file_paths)
+        self.destroy()
+
+    def on_cancel(self):
+        self.result = None
+        self.destroy()
+
+
+def reorder_files(files: List[Path]) -> Optional[List[Path]]:
+    if len(files) <= 1:
+        return files
+    root = tk.Tk()
+    root.withdraw()
+    dlg = ReorderDialog(root, files)
+    root.wait_window(dlg)
+    result = getattr(dlg, "result", None)
+    root.destroy()
+    return result
+
+
+def ask_split_points(duration: Optional[float]) -> Optional[List[float]]:
+    root = tk.Tk()
+    root.withdraw()
+
+    prompt = [
+        "请输入拆分时间点（多个时间可用逗号、空格或换行分隔）",
+        "支持秒数或 HH:MM:SS[.毫秒] 格式。"
+    ]
+    if duration:
+        prompt.append(f"视频总时长约为 {format_hms(duration)}。")
+    prompt_text = "\n".join(prompt)
+
+    while True:
+        value = simpledialog.askstring("视频拆分", prompt_text, parent=root)
+        if value is None:
+            root.destroy()
+            return None
+        tokens = re.split(r"[,\s]+", value.strip())
+        raw_points: List[float] = []
+        error_msg = None
+        for token in tokens:
+            token = token.strip()
+            if not token:
+                continue
+            sec = parse_timestamp(token)
+            if sec is None:
+                error_msg = f"无法解析时间戳：{token}"
+                break
+            raw_points.append(sec)
+        if error_msg:
+            messagebox.showerror("错误", error_msg)
+            continue
+        if not raw_points:
+            messagebox.showerror("错误", "请至少输入一个有效的时间戳。")
+            continue
+        raw_points.sort()
+        cleaned: List[float] = []
+        for sec in raw_points:
+            if sec <= 0:
+                error_msg = "时间戳需大于 0 秒。"
+                break
+            if cleaned and sec <= cleaned[-1]:
+                error_msg = "时间戳需严格递增且不可重复。"
+                break
+            if duration is not None and sec >= duration:
+                error_msg = "时间戳需小于视频总时长。"
+                break
+            cleaned.append(sec)
+        if error_msg:
+            messagebox.showerror("错误", error_msg)
+            continue
+        root.destroy()
+        return cleaned
 
 # =============== 策略参数 ===============
 @dataclass
@@ -293,6 +499,80 @@ class ProgressDialog(tk.Toplevel):
         self.lbl_status.configure(text=f"状态：{text}")
 
 # =============== 后台线程：处理 & 上报进度 ===============
+def run_ffmpeg_with_progress(cmd: List[str], q: Queue, stop_flag: threading.Event,
+                             duration: Optional[float]) -> Tuple[Optional[bool], bool]:
+    creation_flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=creation_flag
+        )
+    except FileNotFoundError:
+        q.put({"type": "error", "msg": "无法找到 ffmpeg，请确认已安装并加入 PATH。"})
+        return False, True
+    except Exception as e:
+        q.put({"type": "error", "msg": f"无法启动 ffmpeg：{e}"})
+        return False, True
+
+    processed = 0.0
+    speed: Optional[str] = None
+    last_emit = time.time()
+
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if stop_flag.is_set():
+                try:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.5)
+                    except Exception:
+                        if proc.poll() is None:
+                            proc.kill()
+                except Exception:
+                    pass
+                q.put({"type": "cancelled"})
+                return None, False
+
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith("out_time_ms="):
+                try:
+                    v = int(s.split("=", 1)[1]) / 1_000_000.0
+                    if v >= processed:
+                        processed = v
+                except Exception:
+                    pass
+            elif s.startswith("speed="):
+                speed = s.split("=", 1)[1].strip()
+
+            now = time.time()
+            if now - last_emit >= 0.2:
+                last_emit = now
+                q.put({"type": "prog_file", "processed": processed, "total": duration, "speed": speed})
+
+        proc.wait()
+        ok = (proc.returncode == 0)
+        if ok and duration:
+            q.put({"type": "prog_file", "processed": duration, "total": duration, "speed": speed})
+        return ok, False
+    except Exception as e:
+        try:
+            if proc and proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+        q.put({"type": "error", "msg": f"处理异常：{e}"})
+        return False, True
+
+
 def worker_thread(files: List[Path], plan: EncodePlan, out_dir: Path, q: Queue, stop_flag: threading.Event):
     """
     事件：
@@ -334,75 +614,126 @@ def worker_thread(files: List[Path], plan: EncodePlan, out_dir: Path, q: Queue, 
             "-i", str(in_path)
         ] + args + [str(out_path)]
 
+        ok, fatal = run_ffmpeg_with_progress(cmd, q, stop_flag, duration)
+        if ok is None:
+            return
+        if ok:
+            done += 1
+        q.put({"type": "end_file", "ok": bool(ok), "name": in_path.name, "out": str(out_path)})
+        q.put({"type": "overall", "done": done, "total": total})
+        if fatal:
+            break
+
+    q.put({"type": "done_all"})
+
+
+def merge_worker(files: List[Path], out_path: Path, q: Queue, stop_flag: threading.Event):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    durations = [ffprobe_duration(p) for p in files]
+    if all(d is not None for d in durations):
+        total_duration = sum(float(d) for d in durations if d is not None)
+    else:
+        total_duration = None
+
+    q.put({"type": "start_file", "name": out_path.name, "total": total_duration})
+
+    list_path: Optional[Path] = None
+    try:
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,           # 进度键值
-                stderr=subprocess.STDOUT,         # 合流
-                text=True, encoding="utf-8", errors="replace",
-                bufsize=1,
-                creationflags=subprocess.CREATE_NO_WINDOW  # ✅ 关键 ffmpeg后台静默运行
-            )
-        except FileNotFoundError:
-            q.put({"type": "error", "msg": "无法找到 ffmpeg，请确认已安装并加入 PATH。"}); break
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as tf:
+                list_path = Path(tf.name)
+                for file_path in files:
+                    tf.write(f"file '{escape_concat_path(file_path.resolve())}'\n")
         except Exception as e:
-            q.put({"type": "error", "msg": f"无法启动 ffmpeg：{e}"}); break
+            q.put({"type": "error", "msg": f"生成合并列表失败：{e}"})
+            q.put({"type": "done_all"})
+            return
 
-        processed = 0.0
-        speed = None
-        last_emit = time.time()
+        cmd = [
+            FFMPEG, "-y", "-hide_banner",
+            "-loglevel", "warning",
+            "-nostats", "-stats_period", "0.4",
+            "-progress", "pipe:1",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_path),
+            "-c", "copy",
+            str(out_path)
+        ]
 
-        try:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                if stop_flag.is_set():
-                    # 取消：优雅→超时→强杀；通知 UI
-                    try:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=1.5)
-                        except Exception:
-                            if proc.poll() is None:
-                                proc.kill()
-                    except Exception:
-                        pass
-                    q.put({"type": "cancelled"})
-                    return
-
-                s = line.strip()
-                if not s:
-                    continue
-
-                if s.startswith("out_time_ms="):
-                    try:
-                        v = int(s.split("=", 1)[1]) / 1_000_000.0
-                        if v >= processed:  # 单调前进
-                            processed = v
-                    except Exception:
-                        pass
-                elif s.startswith("speed="):
-                    speed = s.split("=", 1)[1].strip()  # 形如 1.23x
-
-                now = time.time()
-                if now - last_emit >= 0.2:
-                    last_emit = now
-                    q.put({"type": "prog_file", "processed": processed, "total": duration, "speed": speed})
-
-            proc.wait()
-            ok = (proc.returncode == 0)
-            if ok:
-                done += 1
-
-            q.put({"type": "end_file", "ok": ok, "name": in_path.name, "out": str(out_path)})
-            q.put({"type": "overall", "done": done, "total": total})
-
-        except Exception as e:
+        ok, fatal = run_ffmpeg_with_progress(cmd, q, stop_flag, total_duration)
+        if ok is None:
+            return
+        done = 1 if ok else 0
+        q.put({"type": "end_file", "ok": bool(ok), "name": out_path.name, "out": str(out_path)})
+        q.put({"type": "overall", "done": done, "total": 1})
+        if fatal:
+            q.put({"type": "done_all"})
+            return
+    finally:
+        if list_path and list_path.exists():
             try:
-                if proc and proc.poll() is None:
-                    proc.kill()
+                list_path.unlink()
             except Exception:
                 pass
-            q.put({"type": "error", "msg": f"处理异常：{e}"})
+
+    q.put({"type": "done_all"})
+
+
+def split_worker(in_path: Path, split_points: List[float], out_dir: Path, q: Queue, stop_flag: threading.Event):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    duration = ffprobe_duration(in_path)
+    points = list(split_points)
+    segments: List[Tuple[float, Optional[float]]] = []
+    start = 0.0
+    for point in points:
+        segments.append((start, point))
+        start = point
+    segments.append((start, duration))
+
+    total_segments = len(segments)
+    done = 0
+    suffix = in_path.suffix or ".mp4"
+
+    for idx, (seg_start, seg_end) in enumerate(segments, 1):
+        if stop_flag.is_set():
+            break
+        seg_duration = None
+        if seg_end is not None:
+            seg_duration = max(seg_end - seg_start, 0.0)
+        elif duration is not None:
+            seg_duration = max(duration - seg_start, 0.0)
+
+        out_name = f"{in_path.stem}_part{idx:02d}{suffix}"
+        out_path = ensure_unique_path(out_dir / out_name)
+        if seg_end is not None:
+            seg_label = f"{out_path.name} ({format_hms(seg_start)}-{format_hms(seg_end)})"
+        else:
+            seg_label = f"{out_path.name} ({format_hms(seg_start)}-结束)"
+        q.put({"type": "start_file", "name": seg_label, "total": seg_duration})
+
+        cmd = [
+            FFMPEG, "-y", "-hide_banner",
+            "-loglevel", "warning",
+            "-nostats", "-stats_period", "0.4",
+            "-progress", "pipe:1",
+            "-i", str(in_path)
+        ]
+        if seg_start > 0:
+            cmd += ["-ss", format_timestamp_precise(seg_start)]
+        if seg_duration and seg_duration > 0:
+            cmd += ["-t", format_timestamp_precise(seg_duration)]
+        cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero", str(out_path)]
+
+        ok, fatal = run_ffmpeg_with_progress(cmd, q, stop_flag, seg_duration)
+        if ok is None:
+            return
+        if ok:
+            done += 1
+        q.put({"type": "end_file", "ok": bool(ok), "name": out_path.name, "out": str(out_path)})
+        q.put({"type": "overall", "done": done, "total": total_segments})
+        if fatal:
             break
 
     q.put({"type": "done_all"})
@@ -412,20 +743,79 @@ def main():
     ensure_ff_tools()
 
     mode = choose_mode()
-    plan = build_plan(mode)
+    worker_target = None
+    worker_args_base: Tuple = ()
+    out_dir: Optional[Path] = None
+    total_files = 0
 
-    files = choose_files()
-    if not files:
-        messagebox.showinfo("提示", "未选择任何视频文件。")
+    if mode in {"quality", "size", "audio"}:
+        plan = build_plan(mode)
+        files = choose_files()
+        if not files:
+            messagebox.showinfo("提示", "未选择任何视频文件。")
+            return
+        out_dir = choose_output_dir(default=Path(".").resolve())
+        if not out_dir:
+            messagebox.showinfo("提示", "未选择保存位置，已取消。")
+            return
+        worker_target = worker_thread
+        worker_args_base = (files, plan, out_dir)
+        total_files = len(files)
+
+    elif mode == "merge":
+        files = choose_files(multiple=True, title="选择要合并的视频文件（顺序可在下一步调整）")
+        if len(files) < 2:
+            messagebox.showinfo("提示", "请至少选择两个视频文件。")
+            return
+        ordered = reorder_files(files)
+        if not ordered or len(ordered) < 2:
+            messagebox.showinfo("提示", "未确认合并顺序，已取消。")
+            return
+        default_dir = ordered[0].parent.resolve()
+        out_dir = choose_output_dir(default=default_dir)
+        if not out_dir:
+            messagebox.showinfo("提示", "未选择保存位置，已取消。")
+            return
+        exts = {p.suffix.lower() for p in ordered if p.suffix}
+        if len(exts) == 1:
+            ext = exts.pop()
+        else:
+            ext = ".mp4"
+        default_name = ordered[0].stem + "_merged" + ext
+        merge_out_path = ensure_unique_path(out_dir / default_name)
+        worker_target = merge_worker
+        worker_args_base = (ordered, merge_out_path)
+        total_files = 1
+
+    elif mode == "split":
+        selected = choose_files(multiple=False, title="选择要拆分的视频文件")
+        if not selected:
+            messagebox.showinfo("提示", "未选择任何视频文件。")
+            return
+        in_path = selected[0]
+        duration = ffprobe_duration(in_path)
+        split_points = ask_split_points(duration)
+        if split_points is None:
+            messagebox.showinfo("提示", "未输入拆分时间戳，已取消。")
+            return
+        if not split_points:
+            messagebox.showinfo("提示", "需要至少一个拆分时间戳。")
+            return
+        out_dir = choose_output_dir(default=in_path.parent.resolve())
+        if not out_dir:
+            messagebox.showinfo("提示", "未选择保存位置，已取消。")
+            return
+        worker_target = split_worker
+        worker_args_base = (in_path, split_points, out_dir)
+        total_files = len(split_points) + 1
+
+    else:
+        messagebox.showerror("错误", "未知模式。")
         return
 
-    # ✅ 选择输出目录（必选）
-    out_dir = choose_output_dir(default=Path(".").resolve())
-    if not out_dir:
-        messagebox.showinfo("提示", "未选择保存位置，已取消。")
+    if total_files <= 0 or worker_target is None or out_dir is None:
+        messagebox.showerror("错误", "未能初始化处理任务。")
         return
-
-    total_files = len(files)
 
     # 父窗口（隐藏）
     root = tk.Tk()
@@ -439,7 +829,8 @@ def main():
     stop_flag = threading.Event()
 
     # 启动后台线程
-    t = threading.Thread(target=worker_thread, args=(files, plan, out_dir, q, stop_flag), daemon=True)
+    worker_args = tuple(worker_args_base) + (q, stop_flag)
+    t = threading.Thread(target=worker_target, args=worker_args, daemon=True)
     t.start()
 
     done_count = 0  # ✅ 已完成文件数
