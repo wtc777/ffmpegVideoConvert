@@ -215,6 +215,7 @@ class ReorderDialog(tk.Toplevel):
         self.file_paths = list(files)
 
         self.transient(master)
+
         self.protocol("WM_DELETE_WINDOW", self.on_cancel)
 
         ttk.Label(self, text="选中条目后使用按钮调整拼接顺序。",
@@ -238,6 +239,7 @@ class ReorderDialog(tk.Toplevel):
         self.bind("<Return>", lambda _: self.on_ok())
 
         self.refresh_list(0)
+
         self.after(10, self._make_modal)
 
     def _make_modal(self):
@@ -252,6 +254,7 @@ class ReorderDialog(tk.Toplevel):
             return
         self.lift()
         self.focus_force()
+
 
     def refresh_list(self, selection: int):
         self.listbox.delete(0, tk.END)
