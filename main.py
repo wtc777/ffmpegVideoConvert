@@ -605,10 +605,13 @@ def build_plan(mode: str) -> EncodePlan:
 		)
 	elif mode == "audio":
 		return EncodePlan(
-			args=["-vn", "-acodec", "aac", "-b:a", "128k"],
-			out_suffix=".m4a",
-			replace_ext=True
+			# 只保留音频，去掉视频/字幕/数据/章节/元信息，输出 m4a（mp4a 容器）
+			args = ["-vn", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1",
+			   "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"],
+			out_suffix = ".m4a",
+			replace_ext = True
 		)
+
 	else:
 		raise ValueError("未知模式")
 
@@ -1163,8 +1166,28 @@ def main():
 			worker_target = worker_thread
 			worker_args_base = (files, plan, out_dir)
 			total_files = len(files)
+		elif mode == "audio":
+			# 1) 选择文件
+			files = choose_files()
+			if not files:
+				messagebox.showinfo("提示", "未选择任何视频文件。")
+				return
 
-		# files = choose_files()
+			# 2) 选择输出目录
+			out_dir = choose_output_dir(default=Path(".").resolve())
+			if not out_dir:
+				messagebox.showinfo("提示", "未选择保存位置，已取消。")
+				return
+
+			# 3) 构建只抽音频的计划（如果你已在 build_plan 里写了 audio，就复用；没有就临时写）
+			plan = build_plan("audio")  # 或者直接 plan = EncodePlan([...], ".m4a", True)
+
+			# 4) 指定后台线程与参数基元
+			worker_target = worker_thread
+			worker_args_base = (files, plan, out_dir)
+			total_files = len(files)
+
+	# files = choose_files()
 		# if not files:
 		# 	messagebox.showinfo("提示", "未选择任何视频文件。")
 		# 	return

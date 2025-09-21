@@ -1,4 +1,4 @@
-('C:\\Users\\wellrain\\PycharmProjects\\tc_wang\\ffmpegVideo\\build\\ffmpegVideoConvert\\PYZ-00.pyz',
+('D:\\PycharmProjects\\tc_wang\\ffmpegVideo\\build\\ffmpegVideoConvert\\PYZ-00.pyz',
  [('_compat_pickle',
    'C:\\Users\\wellrain\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\_compat_pickle.py',
    'PYMODULE'),
